@@ -3,12 +3,8 @@ from nnsight import LanguageModel
 import gc
 from tqdm import tqdm
 
-from .config import DEBUG
-
-if DEBUG:
-    tracer_kwargs = {"scan": True, "validate": True}
-else:
-    tracer_kwargs = {"scan": False, "validate": False}
+# nnsight >= 0.6 removed the scan/validate trace kwargs (tracing is always lazy).
+tracer_kwargs = {}
 
 
 class ActivationBuffer:
