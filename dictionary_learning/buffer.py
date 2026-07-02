@@ -3,9 +3,6 @@ from nnsight import LanguageModel
 import gc
 from tqdm import tqdm
 
-# nnsight >= 0.6 removed the scan/validate trace kwargs (tracing is always lazy).
-tracer_kwargs = {}
-
 
 class ActivationBuffer:
     """
@@ -119,7 +116,6 @@ class ActivationBuffer:
             with t.no_grad():
                 with self.model.trace(
                     self.text_batch(),
-                    **tracer_kwargs,
                     invoker_args={"truncation": True, "max_length": self.ctx_len},
                 ):
                     if self.io == "in":
@@ -257,7 +253,6 @@ class HeadActivationBuffer:
             with t.no_grad():
                 with self.model.trace(
                     self.text_batch(),
-                    **tracer_kwargs,
                     invoker_args={"truncation": True, "max_length": self.ctx_len},
                     remote=self.remote,
                 ):
@@ -449,7 +444,6 @@ class NNsightActivationBuffer:
 
             with t.no_grad(), self.model.trace(
                 self.token_batch(),
-                **tracer_kwargs,
                 invoker_args={"truncation": True, "max_length": self.ctx_len},
             ):
                 if self.io in ["in", "in_and_out"]:

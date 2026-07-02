@@ -16,9 +16,6 @@ from .utils import (
     torch_to_numpy_dtype,
 )
 
-# nnsight >= 0.6 removed the scan/validate trace kwargs (tracing is always lazy).
-tracer_kwargs = {}
-
 import torch
 from typing import Tuple
 
@@ -636,7 +633,6 @@ class ActivationCache:
             if overwrite or shape is None:
                 with model.trace(
                     tokens,
-                    **tracer_kwargs,
                 ) as tracer:
                     for i, submodule in enumerate(submodules):
                         local_activations = (
