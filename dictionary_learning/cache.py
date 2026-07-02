@@ -10,17 +10,11 @@ from tqdm.auto import tqdm
 from multiprocessing import Pool, Manager
 import time
 import json
-from .config import DEBUG
 from .utils import (
     dtype_to_str,
     str_to_dtype,
     torch_to_numpy_dtype,
 )
-
-if DEBUG:
-    tracer_kwargs = {"scan": True, "validate": True}
-else:
-    tracer_kwargs = {"scan": False, "validate": False}
 
 import torch
 from typing import Tuple
@@ -639,8 +633,7 @@ class ActivationCache:
             if overwrite or shape is None:
                 with model.trace(
                     tokens,
-                    **tracer_kwargs,
-                ):
+                ) as tracer:
                     for i, submodule in enumerate(submodules):
                         local_activations = (
                             ActivationCache.get_activations(submodule, io)
@@ -650,7 +643,7 @@ class ActivationCache:
                         activation_cache[i].append(local_activations)
 
                     if last_submodule is not None:
-                        last_submodule.output.stop()
+                        tracer.stop()
 
                 for i in range(len(submodules)):
                     activation_cache[i][-1] = activation_cache[i][-1][
