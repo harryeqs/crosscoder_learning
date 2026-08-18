@@ -13,6 +13,28 @@ from typing import List, Optional
 
 from .trainers.batch_top_k import BatchTopKTrainer
 from .trainers.crosscoder import CrossCoderTrainer, BatchTopKCrossCoderTrainer
+from .trainers.hetero_batch_topk import HeteroBatchTopKTrainer
+
+
+def is_hetero_acts(act) -> bool:
+    return isinstance(act, (list, tuple))
+
+
+def move_acts(act, device, dtype: Optional[th.dtype] = None):
+    if is_hetero_acts(act):
+        if dtype is None:
+            return [a.to(device) for a in act]
+        return [a.to(device=device, dtype=dtype) for a in act]
+    act = act.to(device)
+    if dtype is not None:
+        act = act.to(dtype)
+    return act
+
+
+def batch_size_of(act) -> int:
+    if is_hetero_acts(act):
+        return act[0].shape[0]
+    return act.shape[0]
 
 
 def get_stats(
@@ -43,7 +65,19 @@ def get_stats(
         )
 
     # fraction of variance explained
-    if act.dim() == 2:
+    if is_hetero_acts(act):
+        total_variance_per_layer = []
+        residual_variance_per_layer = []
+        for l, (x, xh) in enumerate(zip(act, act_hat)):
+            tv = th.var(x, dim=0).sum()
+            rv = th.var(x - xh, dim=0).sum()
+            total_variance_per_layer.append(tv.cpu())
+            residual_variance_per_layer.append(rv.cpu())
+            out[f"cl{l}_frac_variance_explained"] = (1 - rv / tv).item()
+        total_variance = sum(total_variance_per_layer)
+        residual_variance = sum(residual_variance_per_layer)
+        frac_variance_explained = 1 - residual_variance / total_variance
+    elif act.dim() == 2:
         # act.shape: [batch, d_model]
         # fraction of variance explained
         total_variance = th.var(act, dim=0).sum()
@@ -129,12 +163,13 @@ def run_validation(
     frac_variance_explained = []
     frac_variance_explained_per_feature = []
     deads = []
-    if isinstance(trainer, CrossCoderTrainer) or isinstance(
-        trainer, BatchTopKCrossCoderTrainer
+    if isinstance(
+        trainer,
+        (CrossCoderTrainer, BatchTopKCrossCoderTrainer, HeteroBatchTopKTrainer),
     ):
         frac_variance_explained_per_layer = defaultdict(list)
     for val_step, act in enumerate(tqdm(validation_data, total=len(validation_data))):
-        act = act.to(trainer.device).to(dtype)
+        act = move_acts(act, trainer.device, dtype)
         stats = get_stats(trainer, act, deads_sum=False, step=step)
         l0.append(stats["l0"])
         if "frac_deads" in stats:
@@ -146,14 +181,33 @@ def run_validation(
                 stats["frac_variance_explained_per_feature"]
             )
 
-        if isinstance(trainer, (CrossCoderTrainer, BatchTopKCrossCoderTrainer)):
-            for l in range(act.shape[1]):
+        if isinstance(
+            trainer,
+            (CrossCoderTrainer, BatchTopKCrossCoderTrainer, HeteroBatchTopKTrainer),
+        ):
+            n_sides = (
+                len(act)
+                if is_hetero_acts(act)
+                else act.shape[1]
+            )
+            for l in range(n_sides):
                 if f"cl{l}_frac_variance_explained" in stats:
                     frac_variance_explained_per_layer[l].append(
                         stats[f"cl{l}_frac_variance_explained"]
                     )
     log = {}
-    if isinstance(trainer, (CrossCoderTrainer, BatchTopKCrossCoderTrainer)):
+    if isinstance(trainer, HeteroBatchTopKTrainer):
+        norms = [W.norm(dim=-1) for W in trainer.ae.decoder.weights]
+        dec_norms_sum = sum(norms)
+        for layer_idx, dec_norms in enumerate(norms):
+            dec_norm_diff = 0.5 * (
+                (2 * dec_norms - dec_norms_sum)
+                / th.maximum(dec_norms, dec_norms_sum - dec_norms)
+                + 1
+            )
+            num_layer_specific_latents = (dec_norm_diff > 0.9).sum().item()
+            log[f"val/num_specific_latents_l{layer_idx}"] = num_layer_specific_latents
+    elif isinstance(trainer, (CrossCoderTrainer, BatchTopKCrossCoderTrainer)):
         dec_norms = trainer.ae.decoder.weight.norm(dim=-1)
         dec_norms_sum = dec_norms.sum(dim=0)
         for layer_idx in range(trainer.ae.decoder.num_layers):
@@ -177,8 +231,9 @@ def run_validation(
         log["val/frac_variance_explained_per_feature"] = (
             frac_variance_explained_per_feature
         )
-    if isinstance(trainer, CrossCoderTrainer) or isinstance(
-        trainer, BatchTopKCrossCoderTrainer
+    if isinstance(
+        trainer,
+        (CrossCoderTrainer, BatchTopKCrossCoderTrainer, HeteroBatchTopKTrainer),
     ):
         for l in frac_variance_explained_per_layer:
             log[f"val/cl{l}_frac_variance_explained"] = th.tensor(
@@ -292,8 +347,8 @@ def trainSAE(
     for step, act in enumerate(tqdm(data, total=steps)):
         if steps is not None and step >= steps:
             break
-        act = act.to(trainer.device).to(dtype)
-        num_tokens += act.shape[0]
+        act = move_acts(act, trainer.device, dtype)
+        num_tokens += batch_size_of(act)
         # logging
         if log_steps is not None and step % log_steps == 0 and step != 0:
             with th.no_grad():
@@ -307,8 +362,13 @@ def trainSAE(
                     epoch_idx_per_step=epoch_idx_per_step,
                     num_tokens=num_tokens,
                 )
-                if isinstance(trainer, BatchTopKCrossCoderTrainer) or isinstance(
-                    trainer, BatchTopKTrainer
+                if isinstance(
+                    trainer,
+                    (
+                        BatchTopKCrossCoderTrainer,
+                        BatchTopKTrainer,
+                        HeteroBatchTopKTrainer,
+                    ),
                 ):
                     log_stats(
                         trainer,

@@ -6,4 +6,5 @@ from .dictionary import (
     BatchTopKSAE,
     BatchTopKCrossCoder,
 )
+from .hetero import HeteroBatchTopK, HeteroActivationCache, hetero_collate
 from .buffer import ActivationBuffer
